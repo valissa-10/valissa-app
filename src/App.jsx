@@ -1,7 +1,28 @@
 import React, { useEffect, useState } from 'react'
 import { supabase } from './lib/supabase'
 import { useCartStore } from './store/useCartStore'
-import { ShoppingBag, Tag, Send, Sparkles, PlusCircle, LayoutGrid, CheckCircle, Lock, Upload, Package, User, MapPin, CreditCard, KeyRound, MessageCircle, Heart, Star, Filter, Baby, Search, X } from 'lucide-react'
+import {
+  ShoppingBag,
+  Send,
+  Sparkles,
+  LayoutGrid,
+  CheckCircle,
+  Lock,
+  Upload,
+  Package,
+  User,
+  MapPin,
+  CreditCard,
+  KeyRound,
+  MessageCircle,
+  Heart,
+  Star,
+  Filter,
+  Baby,
+  Search,
+  X,
+  Percent
+} from 'lucide-react'
 
 // Imagen por defecto si no carga alguna categoría
 const PLACEHOLDER_IMG = 'https://images.unsplash.com/photo-1519238263530-99bdd11df2ea?w=200&auto=format&fit=crop&q=80'
@@ -10,6 +31,8 @@ const PLACEHOLDER_IMG = 'https://images.unsplash.com/photo-1519238263530-99bdd11
 const BRAND_COLOR = '#49c5d1'
 // Clave secreta de administración
 const ADMIN_PIN = 'valissa2026'
+// Descuento automático (%) al llevar 3+ piezas del mismo tipo (Conjuntos, Pijamas o Valentina)
+const AUTO_DISCOUNT_PERCENT = 16.67
 
 // Categorías oficiales con sus imágenes de la carpeta public/ (y 'Todas' con img: null para usar diseño vectorial limpio)
 const CATEGORIES = [
@@ -24,6 +47,15 @@ const CATEGORIES = [
 { id: 'Personalizados en sublimación', name: 'Sublimación', img: '/sublimacion.jpg', description: 'Prendas personalizadas' }
 ]
 
+// Agrupa el producto según su tipo de descuento: 'conjunto' | 'pijama' | 'valentina' | null
+function getDiscountGroup(product) {
+  const cat = (product?.category || '').toLowerCase()
+  if (cat.includes('conjunto')) return 'conjunto'
+    if (cat.includes('pijama')) return 'pijama'
+      if (cat.includes('valentina')) return 'valentina'
+        return null
+}
+
 export default function App() {
   const [isAdminMode, setIsAdminMode] = useState(false)
   const [adminAuthenticated, setAdminAuthenticated] = useState(() => {
@@ -36,11 +68,11 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState('Todas')
 
-  // Estado para el Buscador por palabras clave (Iron Man, Spiderman, pijama, etc.)
+  // Estado para el Buscador por palabras clave
   const [searchKeyword, setSearchKeyword] = useState('')
 
-  const [couponInput, setCouponInput] = useState('')
-  const [couponError, setCouponError] = useState('')
+  // Estado del carrito flotante / modal
+  const [isCartOpen, setIsCartOpen] = useState(false)
 
   // Datos del Cliente para Checkout
   const [customerName, setCustomerName] = useState('')
@@ -59,18 +91,45 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false)
   const [successMsg, setSuccessMsg] = useState('')
 
-  const { cart, addToCart, removeFromCart, applyCoupon, coupon, getTotal } = useCartStore()
+  const { cart, addToCart, removeFromCart } = useCartStore()
 
-  const totalItemsCount = cart.reduce((sum, item) => sum + item.quantity, 0)
+  const totalItemsCount = cart.reduce((sum, item) => sum + (item.quantity || 1), 0)
 
-  // Cantidad de conjuntos, pijamas o Valentina para validar el cupón
-  const eligibleItemsCount = cart.reduce((sum, item) => {
-    const cat = (item.product.category || '').toLowerCase()
-    if (cat.includes('conjunto') || cat.includes('pijama') || cat.includes('valentina')) {
-      return sum + item.quantity
+  // Conteo y subtotal separado por cada grupo (sin mezclar categorías)
+  const groupStats = cart.reduce(
+    (acc, item) => {
+      const group = getDiscountGroup(item.product)
+      const qty = item.quantity || 1
+      const lineTotal = Number(item.product.price || 0) * qty
+      if (group) {
+        acc[group].count += qty
+        acc[group].subtotal += lineTotal
+      }
+      return acc
+    },
+    {
+      conjunto: { count: 0, subtotal: 0, label: 'Conjuntos' },
+      pijama: { count: 0, subtotal: 0, label: 'Pijamas' },
+      valentina: { count: 0, subtotal: 0, label: 'Línea Valentina' }
     }
-    return sum
+  )
+
+  const subtotalAmount = cart.reduce((sum, item) => {
+    return sum + Number(item.product.price || 0) * (item.quantity || 1)
   }, 0)
+
+  // Solo reciben descuento los grupos que tengan 3 o más piezas de ese mismo tipo
+  const qualifiedGroups = Object.entries(groupStats)
+  .filter(([, data]) => data.count >= 3)
+  .map(([key, data]) => ({
+    key,
+    ...data,
+    discount: Math.round(data.subtotal * (AUTO_DISCOUNT_PERCENT / 100))
+  }))
+
+  const hasAutoDiscount = qualifiedGroups.length > 0
+  const autoDiscountAmount = qualifiedGroups.reduce((sum, g) => sum + g.discount, 0)
+  const finalTotalAmount = Math.max(0, subtotalAmount - autoDiscountAmount)
 
   useEffect(() => {
     fetchProducts()
@@ -80,9 +139,20 @@ export default function App() {
     }
   }, [])
 
+  // Si se vacía el carrito, regresa el modal a la vista normal
+  useEffect(() => {
+    if (cart.length === 0) {
+      setShowCheckoutForm(false)
+    }
+  }, [cart.length])
+
   async function fetchProducts() {
     setLoading(true)
-    const { data, error } = await supabase.from('products').select('*').eq('is_active', true).order('created_at', { ascending: false })
+    const { data, error } = await supabase
+    .from('products')
+    .select('*')
+    .eq('is_active', true)
+    .order('created_at', { ascending: false })
     if (!error && data) {
       setProducts(data)
     }
@@ -106,32 +176,6 @@ export default function App() {
     setIsAdminMode(false)
     localStorage.removeItem('valissa_admin_auth')
     window.history.replaceState({}, '', window.location.pathname)
-  }
-
-  function handleApplyCoupon() {
-    setCouponError('')
-    const codeClean = couponInput.trim().toUpperCase()
-
-    if (!codeClean) {
-      setCouponError('Escribe un código de cupón')
-      return
-    }
-
-    if (eligibleItemsCount < 3) {
-      setCouponError('El cupón aplica a partir de 3 piezas exclusivamente en Conjuntos, Pijamas o línea Valentina')
-      return
-    }
-
-    if (codeClean === 'VALISSA20' || codeClean === 'VALISSA10' || codeClean === 'APP20' || codeClean === 'VALISSA') {
-      const res = applyCoupon({ code: codeClean, discount_percent: 16.67 })
-      if (res.success) {
-        setCouponInput('')
-      } else {
-        setCouponError(res.message)
-      }
-    } else {
-      setCouponError('Cupón inválido o expirado')
-    }
   }
 
   async function handleCreateProduct(e) {
@@ -211,15 +255,19 @@ export default function App() {
       message += `*Detalle de prendas:*\n`
 
       cart.forEach((item, index) => {
+        const qty = item.quantity || 1
         message += `${index + 1}. *${item.product.name}* (${item.product.category || 'General'} — Talla: ${item.selectedSize || 'Única'})\n`
-        message += `   Precio: $${Number(item.product.price).toLocaleString()} COP x ${item.quantity}\n`
+        message += `   Precio: $${Number(item.product.price).toLocaleString()} COP x ${qty}\n`
       })
 
-      if (coupon && eligibleItemsCount >= 3) {
-        message += `\n*Cupón aplicado (16.67% desc. en Conjuntos/Pijamas/Valentina):* ${coupon.code}\n`
+      message += `\n*Subtotal:* $${subtotalAmount.toLocaleString()} COP`
+
+      if (hasAutoDiscount) {
+        const labels = qualifiedGroups.map((g) => `${g.label} (${g.count} pzas)`).join(', ')
+        message += `\n*Descuento automático (${AUTO_DISCOUNT_PERCENT}% en ${labels}):* -$${autoDiscountAmount.toLocaleString()} COP`
       }
 
-      message += `\n*Total a pagar: $${getTotal().toLocaleString()} COP*`
+      message += `\n*Total a pagar: $${finalTotalAmount.toLocaleString()} COP*`
 
       const whatsappUrl = `https://wa.me/584242111582?text=${encodeURIComponent(message)}`
       window.open(whatsappUrl, '_blank')
@@ -232,7 +280,7 @@ export default function App() {
   }
 
   // Filtrado combinado: respeta la categoría seleccionada y filtra por palabra clave en tiempo real
-  const filteredProducts = products.filter(p => {
+  const filteredProducts = products.filter((p) => {
     const matchesCategory = selectedCategoryFilter === 'Todas' || p.category === selectedCategoryFilter
 
     if (!searchKeyword.trim()) return matchesCategory
@@ -246,7 +294,7 @@ export default function App() {
   })
 
   return (
-    <div className="min-h-screen text-slate-800 font-sans selection:bg-[#49c5d1]/30 selection:text-slate-900 flex flex-col justify-between bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:24px_24px] bg-sky-50/30">
+    <div className="min-h-screen text-slate-800 font-sans selection:bg-[#49c5d1]/30 selection:text-slate-900 flex flex-col justify-between bg-[radial-gradient(#cbd5e1_1px,transparent_1px)] [background-size:24px_24px] bg-sky-50/30 pb-24">
     <div>
     {/* Header */}
     <header className="bg-white/95 backdrop-blur-md sticky top-0 z-20 border-b border-sky-100 px-6 py-4 flex justify-between items-center shadow-sm">
@@ -259,7 +307,9 @@ export default function App() {
     </div>
     <div>
     <h1 className="text-2xl font-black tracking-wider" style={{ color: '#2da8b4' }}>VALISSA</h1>
-    <p className="text-[10px] tracking-widest font-extrabold uppercase" style={{ color: BRAND_COLOR }}>Diseño y Costura Infantil</p>
+    <p className="text-[10px] tracking-widest font-extrabold uppercase" style={{ color: BRAND_COLOR }}>
+    Diseño y Costura Infantil
+    </p>
     </div>
     </div>
 
@@ -288,8 +338,12 @@ export default function App() {
     <Star className="w-3.5 h-3.5 text-yellow-300 fill-yellow-300" /> Moda Infantil & Estampados Únicos
     </span>
     <h2 className="text-3xl md:text-5xl font-black tracking-wide drop-shadow-sm">¡Hecho con Amor & Color!</h2>
-    <p className="text-xs md:text-sm text-white/90 font-medium max-w-lg mx-auto leading-relaxed">
-    Lleva <span className="font-black underline">3 piezas o más</span> en Conjuntos, Pijamas o línea Valentina y obtén descuento con el cupón <span className="font-black bg-white text-slate-900 px-2 py-0.5 rounded-lg shadow">VALISSA20</span>.
+    <p className="text-xs md:text-sm text-white/95 font-medium max-w-lg mx-auto leading-relaxed">
+    Lleva <span className="font-black underline">3 piezas o más del mismo tipo</span> (3 Conjuntos, 3 Pijamas o 3 Valentina) y obtén{' '}
+    <span className="font-black bg-white text-slate-900 px-2 py-0.5 rounded-lg shadow">
+    {AUTO_DISCOUNT_PERCENT}% OFF AUTOMÁTICO
+    </span>
+    .
     </p>
     </div>
     </div>
@@ -347,13 +401,19 @@ export default function App() {
           }`}
           >
           {/* Círculo de Imagen o Icono Vectorial para "Todas" */}
-          <div className={`w-20 h-20 rounded-full overflow-hidden shadow-xs relative bg-sky-50 border-4 transition flex items-center justify-center ${isSelected ? 'border-[#49c5d1]' : 'border-white'}`}>
+          <div
+          className={`w-20 h-20 rounded-full overflow-hidden shadow-xs relative bg-sky-50 border-4 transition flex items-center justify-center ${
+            isSelected ? 'border-[#49c5d1]' : 'border-white'
+          }`}
+          >
           {cat.img ? (
             <img
             src={cat.img}
             alt={cat.description}
             className="w-full h-full object-cover group-hover:scale-110 transition duration-500"
-            onError={(e) => { e.target.src = PLACEHOLDER_IMG }}
+            onError={(e) => {
+              e.target.src = PLACEHOLDER_IMG
+            }}
             />
           ) : (
             <div className="w-full h-full bg-gradient-to-br from-sky-400 to-[#2da8b4] flex items-center justify-center text-white group-hover:scale-110 transition duration-500">
@@ -363,7 +423,11 @@ export default function App() {
           </div>
           {/* Texto de Categoría */}
           <div className="space-y-1">
-          <span className={`text-[10px] font-black leading-tight block ${isSelected ? 'text-[#2da8b4]' : 'text-slate-800'}`}>
+          <span
+          className={`text-[10px] font-black leading-tight block ${
+            isSelected ? 'text-[#2da8b4]' : 'text-slate-800'
+          }`}
+          >
           {cat.name}
           </span>
           <span className="text-[8px] text-slate-400 font-medium block leading-tight line-clamp-1">
@@ -376,206 +440,78 @@ export default function App() {
       </div>
       </div>
 
-      {/* TIENDA CLIENTES */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 pt-4">
-      <section className="lg:col-span-2">
+      {/* CATÁLOGO DE PRODUCTOS */}
+      <section className="pt-2">
       <div className="flex justify-between items-center mb-6 border-b-2 border-sky-100 pb-3">
       <h3 className="text-lg font-black text-slate-800 flex items-center gap-2">
-      <Heart className="w-5 h-5 fill-current" style={{ color: BRAND_COLOR }} /> {selectedCategoryFilter === 'Todas' ? 'Catálogo de Creaciones' : CATEGORIES.find(c => c.id === selectedCategoryFilter)?.name}
-      </h3>
-      <span
-      className="text-xs font-extrabold px-3.5 py-1.5 rounded-full shadow-xs text-slate-800"
-      style={{ backgroundColor: '#d0f2f5' }}
-      >
-      {filteredProducts.length} disponibles
-      </span>
+      <Heart className="w-5 h-5 fill-current" style={{ color: BRAND_COLOR }} />{' '}
+      {selectedCategoryFilter === 'Todas'
+        ? 'Catálogo de Creaciones'
+    : CATEGORIES.find((c) => c.id === selectedCategoryFilter)?.name}
+    </h3>
+    <span
+    className="text-xs font-extrabold px-3.5 py-1.5 rounded-full shadow-xs text-slate-800"
+    style={{ backgroundColor: '#d0f2f5' }}
+    >
+    {filteredProducts.length} disponibles
+    </span>
+    </div>
+
+    {loading ? (
+      <div className="text-center py-20 text-sm animate-pulse font-bold" style={{ color: BRAND_COLOR }}>
+      Cargando colección mágica...
       </div>
-
-      {loading ? (
-        <div className="text-center py-20 text-sm animate-pulse font-bold" style={{ color: BRAND_COLOR }}>Cargando colección mágica...</div>
-      ) : filteredProducts.length === 0 ? (
-        <div className="bg-white/90 backdrop-blur-xs p-12 rounded-3xl text-center border-2 border-dashed border-sky-200 shadow-sm">
-        <p className="text-slate-700 font-bold text-sm leading-relaxed">No se encontraron prendas con ese criterio de búsqueda.<br />¡Prueba con otra palabra o categoría!</p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-        {filteredProducts.map((p) => {
-          const sizesList = p.sizes ? p.sizes.split(',').map(s => s.trim()) : ['Única']
-          return (
-            <ProductCard key={p.id} product={p} sizes={sizesList} onAddToCart={addToCart} />
-          )
-        })}
-        </div>
-      )}
-      </section>
-
-      {/* CARRITO Y CHECKOUT */}
-      <section className="bg-white/95 backdrop-blur-xs p-6 rounded-3xl border-2 border-sky-100 shadow-lg h-fit sticky top-24">
-      <h3 className="text-base font-black mb-4 border-b border-slate-100 pb-3 flex items-center justify-between text-slate-800">
-      <span className="flex items-center gap-2">
-      <ShoppingBag className="w-4 h-4" style={{ color: BRAND_COLOR }} /> Tu Pedido
-      </span>
-      <div
-      className="text-white px-3 py-1 rounded-full text-xs font-black shadow-sm"
-      style={{ backgroundColor: BRAND_COLOR }}
-      >
-      <span>{totalItemsCount}</span>
-      </div>
-      </h3>
-
-      {cart.length === 0 ? (
-        <p className="text-xs text-slate-400 text-center py-12 font-medium">Tu carrito está esperando por prendas hermosas</p>
-      ) : !showCheckoutForm ? (
-        <div className="space-y-4">
-        <div className="max-h-56 overflow-y-auto pr-1 space-y-3">
-        {cart.map((item, index) => (
-          <div key={index} className="flex justify-between items-center text-xs border-b border-slate-100 pb-3 gap-2">
-          <div>
-          <p className="font-black text-slate-800">{item.product.name}</p>
-          <p className="text-[10px] font-extrabold text-slate-500 uppercase">{item.product.category || 'General'}</p>
-          <p className="font-bold" style={{ color: '#2da8b4' }}>Talla: {item.selectedSize || 'Única'}</p>
-          <p className="text-slate-500 mt-0.5">${Number(item.product.price).toLocaleString()} COP × {item.quantity}</p>
-          </div>
-          <button onClick={() => removeFromCart(index)} className="text-rose-400 hover:text-rose-600 font-black p-2 transition text-sm">✕</button>
-          </div>
-        ))}
-        </div>
-
-        <div className="pt-3 border-t border-slate-100">
-        <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5 mb-1">
-        <Tag className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> ¿Tienes un cupón?
-        </label>
-        <p className="text-[10px] text-slate-400 font-medium mb-2">* Aplica con 3+ piezas en Conjuntos, Pijamas o Valentina.</p>
-
-        <div className="flex gap-2">
-        <input
-        type="text"
-        placeholder="Ej: VALISSA20"
-        value={couponInput}
-        onChange={(e) => setCouponInput(e.target.value)}
-        className="w-full text-xs p-3 bg-sky-50/50 border border-sky-200 rounded-xl uppercase font-black text-slate-700 focus:outline-none focus:border-[#49c5d1] transition"
-        />
-        <button onClick={handleApplyCoupon} className="bg-slate-900 text-white text-xs px-4 rounded-xl font-black hover:bg-slate-800 transition">Aplicar</button>
-        </div>
-        {couponError && <p className="text-[11px] text-rose-500 font-bold mt-1.5 leading-snug">{couponError}</p>}
-        {coupon && eligibleItemsCount >= 3 && (
-          <p className="text-[11px] text-emerald-600 font-black mt-1.5">¡Cupón {coupon.code} aplicado!</p>
-        )}
-        </div>
-
-        <div className="pt-4 border-t border-slate-100">
-        <div className="flex justify-between items-center text-base font-black mb-4 text-slate-800">
-        <span>Total a pagar:</span>
-        <span className="text-lg" style={{ color: '#2da8b4' }}>${getTotal().toLocaleString()} COP</span>
-        </div>
-
-        <button
-        onClick={() => setShowCheckoutForm(true)}
-        className="w-full text-white py-4 rounded-2xl text-xs font-black flex items-center justify-center gap-2 hover:opacity-95 shadow-md active:scale-95 transition"
-        style={{ backgroundColor: BRAND_COLOR }}
-        >
-        Continuar con los Datos de Envío
-        </button>
-        </div>
-        </div>
-      ) : (
-        /* FORMULARIO DE CHECKOUT */
-        <form onSubmit={handleSendWhatsApp} className="space-y-4">
-        <div className="flex justify-between items-center border-b border-slate-100 pb-2">
-        <span className="text-xs font-black" style={{ color: '#2da8b4' }}>Datos para la Entrega</span>
-        <button
-        type="button"
-        onClick={() => setShowCheckoutForm(false)}
-        className="text-[11px] text-slate-400 hover:text-slate-600 font-bold"
-        >
-        ← Volver
-        </button>
-        </div>
-
-        <div>
-        <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mb-1">
-        <User className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> Nombre Completo
-        </label>
-        <input
-        type="text"
-        required
-        placeholder="Ej: María Pérez"
-        value={customerName}
-        onChange={(e) => setCustomerName(e.target.value)}
-        className="w-full text-xs p-3 bg-sky-50/40 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-medium"
-        />
-        </div>
-
-        <div>
-        <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mb-1">
-        <MapPin className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> Dirección / Punto de Referencia
-        </label>
-        <input
-        type="text"
-        required
-        placeholder="Ej: Barrio obrero / plaza los mangos"
-        value={customerAddress}
-        onChange={(e) => setCustomerAddress(e.target.value)}
-        className="w-full text-xs p-3 bg-sky-50/40 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-medium"
-        />
-        </div>
-
-        <div>
-        <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mb-1">
-        <CreditCard className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> Método de Pago (Pesos COP)
-        </label>
-        <select
-        value={paymentMethod}
-        onChange={(e) => setPaymentMethod(e.target.value)}
-        className="w-full text-xs p-3 bg-sky-50/40 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-bold text-slate-800"
-        >
-        <option value="Efectivo (Pesos COP)">Efectivo (Pesos COP)</option>
-        <option value="Transferencia Bancolombia">Transferencia Bancaria (Bancolombia)</option>
-        <option value="Nequi / Daviplata">Nequi / Daviplata</option>
-        </select>
-        </div>
-
-        <div className="pt-2 border-t border-slate-100">
-        <div className="flex justify-between items-center text-sm font-black mb-4 text-slate-800">
-        <span>Total:</span>
-        <span className="text-lg" style={{ color: '#2da8b4' }}>${getTotal().toLocaleString()} COP</span>
-        </div>
-
-        <button
-        type="submit"
-        className="w-full bg-emerald-500 text-white py-4 rounded-2xl text-xs font-black flex items-center justify-center gap-2 hover:bg-emerald-600 shadow-md shadow-emerald-500/20 active:scale-95 transition"
-        >
-        <Send className="w-4 h-4" /> Enviar Pedido a WhatsApp
-        </button>
-        </div>
-        </form>
-      )}
-      </section>
-      </div>
-
-      {/* BANNER CONSULTA PERSONALIZADA */}
-      <div
-      className="text-white p-8 sm:p-12 rounded-3xl shadow-xl flex flex-col sm:flex-row items-center justify-between gap-6 text-center sm:text-left relative overflow-hidden"
-      style={{ backgroundColor: BRAND_COLOR }}
-      >
-      <div className="absolute inset-0 opacity-10 bg-[radial-gradient(#fff_2px,transparent_2px)] [background-size:16px_16px]"></div>
-      <div className="relative z-10 space-y-2 max-w-xl">
-      <span className="bg-white/20 backdrop-blur-md text-white border border-white/30 text-[10px] px-3.5 py-1 rounded-full font-black uppercase tracking-wider">
-      ✨ Bajo Pedido & Sublimación
-      </span>
-      <h3 className="text-xl sm:text-2xl font-black">¿Buscas un diseño especial, personalizado o bajo medida?</h3>
-      <p className="text-xs sm:text-sm text-white/90 font-medium leading-relaxed">
-      Creamos la pieza exacta que imaginas mediante sublimación y costura personalizada. ¡Escríbenos directamente!
+    ) : filteredProducts.length === 0 ? (
+      <div className="bg-white/90 backdrop-blur-xs p-12 rounded-3xl text-center border-2 border-dashed border-sky-200 shadow-sm">
+      <p className="text-slate-700 font-bold text-sm leading-relaxed">
+      No se encontraron prendas con ese criterio de búsqueda.
+      <br />
+      ¡Prueba con otra palabra o categoría!
       </p>
       </div>
-      <button
-      onClick={handleCustomRequestWhatsApp}
-      className="relative z-10 bg-white text-slate-900 font-black text-xs sm:text-sm px-6 py-4 rounded-2xl shadow-lg hover:bg-yellow-300 flex items-center gap-2.5 flex-shrink-0 active:scale-95 transition"
-      >
-      <MessageCircle className="w-5 h-5 text-emerald-600" /> Contactar por WhatsApp
-      </button>
+    ) : (
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+      {filteredProducts.map((p) => {
+        const sizesList = p.sizes ? p.sizes.split(',').map((s) => s.trim()) : ['Única']
+        return (
+          <ProductCard
+          key={p.id}
+          product={p}
+          sizes={sizesList}
+          onAddToCart={addToCart}
+          />
+        )
+      })}
       </div>
-      </>
+    )}
+    </section>
+
+    {/* BANNER CONSULTA PERSONALIZADA */}
+    <div
+    className="text-white p-8 sm:p-12 rounded-3xl shadow-xl flex flex-col sm:flex-row items-center justify-between gap-6 text-center sm:text-left relative overflow-hidden"
+    style={{ backgroundColor: BRAND_COLOR }}
+    >
+    <div className="absolute inset-0 opacity-10 bg-[radial-gradient(#fff_2px,transparent_2px)] [background-size:16px_16px]"></div>
+    <div className="relative z-10 space-y-2 max-w-xl">
+    <span className="bg-white/20 backdrop-blur-md text-white border border-white/30 text-[10px] px-3.5 py-1 rounded-full font-black uppercase tracking-wider">
+    ✨ Bajo Pedido & Sublimación
+    </span>
+    <h3 className="text-xl sm:text-2xl font-black">
+    ¿Buscas un diseño especial, personalizado o bajo medida?
+    </h3>
+    <p className="text-xs sm:text-sm text-white/90 font-medium leading-relaxed">
+    Creamos la pieza exacta que imaginas mediante sublimación y costura personalizada. ¡Escríbenos
+    directamente!
+    </p>
+    </div>
+    <button
+    onClick={handleCustomRequestWhatsApp}
+    className="relative z-10 bg-white text-slate-900 font-black text-xs sm:text-sm px-6 py-4 rounded-2xl shadow-lg hover:bg-yellow-300 flex items-center gap-2.5 flex-shrink-0 active:scale-95 transition"
+    >
+    <MessageCircle className="w-5 h-5 text-emerald-600" /> Contactar por WhatsApp
+    </button>
+    </div>
+    </>
     ) : !adminAuthenticated ? (
       /* LOGIN ADMIN */
       <div className="max-w-md mx-auto bg-white/95 backdrop-blur-xs p-8 rounded-3xl border-2 border-sky-200 shadow-xl text-center">
@@ -586,7 +522,9 @@ export default function App() {
       <KeyRound className="w-7 h-7" />
       </div>
       <h3 className="text-lg font-black text-slate-900">Acceso Privado</h3>
-      <p className="text-xs text-slate-500 mt-1 mb-6 font-medium">Ingresa la clave de administración de Valissa.</p>
+      <p className="text-xs text-slate-500 mt-1 mb-6 font-medium">
+      Ingresa la clave de administración de Valissa.
+      </p>
 
       <form onSubmit={handleAdminLogin} className="space-y-4">
       <input
@@ -628,7 +566,9 @@ export default function App() {
       <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
       <div>
       <h3 className="text-xl font-black text-slate-900">Panel de Administración</h3>
-      <p className="text-xs text-slate-500 font-medium">Publica nuevas prendas seleccionando su categoría oficial.</p>
+      <p className="text-xs text-slate-500 font-medium">
+      Publica nuevas prendas seleccionando su categoría oficial.
+      </p>
       </div>
       <div className="flex gap-2">
       <button
@@ -658,7 +598,9 @@ export default function App() {
 
       <form onSubmit={handleCreateProduct} className="space-y-4">
       <div>
-      <label className="block text-xs font-bold text-slate-700 mb-1">Nombre de la Prenda o Estampado</label>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+      Nombre de la Prenda o Estampado
+      </label>
       <input
       type="text"
       required
@@ -676,8 +618,10 @@ export default function App() {
       onChange={(e) => setFormCategory(e.target.value)}
       className="w-full text-xs p-3.5 bg-sky-50/50 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-bold text-slate-800"
       >
-      {CATEGORIES.filter(c => c.id !== 'Todas').map(cat => (
-        <option key={cat.id} value={cat.id}>{cat.name}</option>
+      {CATEGORIES.filter((c) => c.id !== 'Todas').map((cat) => (
+        <option key={cat.id} value={cat.id}>
+        {cat.name}
+        </option>
       ))}
       </select>
       </div>
@@ -730,7 +674,9 @@ export default function App() {
       </div>
 
       <div>
-      <label className="block text-xs font-bold text-slate-700 mb-1">Foto de la Prenda (Cámara o Galería)</label>
+      <label className="block text-xs font-bold text-slate-700 mb-1">
+      Foto de la Prenda (Cámara o Galería)
+      </label>
       <div className="flex items-center gap-2">
       <label
       className="w-full cursor-pointer border border-dashed border-sky-300 p-4 rounded-xl text-xs font-black flex items-center justify-center gap-2 transition shadow-xs"
@@ -775,13 +721,25 @@ export default function App() {
       </h4>
       <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
       {products.map((p) => (
-        <div key={p.id} className="flex items-center justify-between p-3.5 bg-sky-50/40 border border-sky-100 rounded-2xl text-xs gap-2">
+        <div
+        key={p.id}
+        className="flex items-center justify-between p-3.5 bg-sky-50/40 border border-sky-100 rounded-2xl text-xs gap-2"
+        >
         <div className="flex items-center gap-3">
-        <img src={p.image_url || PLACEHOLDER_IMG} alt={p.name} className="w-12 h-12 object-cover rounded-full border border-sky-200 shadow-xs flex-shrink-0" />
+        <img
+        src={p.image_url || PLACEHOLDER_IMG}
+        alt={p.name}
+        className="w-12 h-12 object-cover rounded-full border border-sky-200 shadow-xs flex-shrink-0"
+        />
         <div>
         <p className="font-black text-slate-900 line-clamp-1">{p.name}</p>
-        <p className="text-[10px] font-extrabold uppercase" style={{ color: '#2da8b4' }}>{CATEGORIES.find(c => c.id === p.category)?.name || p.category}</p>
-        <p className="font-bold text-slate-600">${Number(p.price).toLocaleString()} COP — <span className="text-slate-500 font-extrabold">Stock: {p.stock}</span></p>
+        <p className="text-[10px] font-extrabold uppercase" style={{ color: '#2da8b4' }}>
+        {CATEGORIES.find((c) => c.id === p.category)?.name || p.category}
+        </p>
+        <p className="font-bold text-slate-600">
+        ${Number(p.price).toLocaleString()} COP —{' '}
+        <span className="text-slate-500 font-extrabold">Stock: {p.stock}</span>
+        </p>
         </div>
         </div>
         <button
@@ -799,6 +757,248 @@ export default function App() {
     </main>
     </div>
 
+    {/* BOTÓN FLOTANTE DE CARRITO (SIEMPRE ACCESIBLE SIN BAJAR TODO EL CATÁLOGO) */}
+    {!isAdminMode && (
+      <button
+      onClick={() => setIsCartOpen(true)}
+      className="fixed bottom-5 right-5 z-30 text-white px-5 py-3.5 rounded-full shadow-2xl hover:scale-105 active:scale-95 transition flex items-center gap-3 border-2 border-white"
+      style={{ backgroundColor: '#2da8b4' }}
+      aria-label="Abrir pedido"
+      >
+      <div className="relative flex items-center justify-center">
+      <ShoppingBag className="w-5 h-5" />
+      <span className="ml-1.5 bg-white text-slate-900 text-[11px] font-black px-2 py-0.5 rounded-full">
+      {totalItemsCount}
+      </span>
+      </div>
+      <div className="text-left leading-tight">
+      <span className="block text-[10px] uppercase tracking-wider font-extrabold text-white/90">
+      Ver Pedido
+      </span>
+      <span className="block text-xs font-black">
+      ${finalTotalAmount.toLocaleString()} COP
+      </span>
+      </div>
+      </button>
+    )}
+
+    {/* MODAL / PANEL DESPLEGABLE DEL CARRITO Y CHECKOUT */}
+    {!isAdminMode && isCartOpen && (
+      <div
+      className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
+      onClick={() => setIsCartOpen(false)}
+      >
+      <div
+      className="bg-white w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl border-2 border-sky-100 shadow-2xl p-6 max-h-[90vh] overflow-y-auto"
+      onClick={(e) => e.stopPropagation()}
+      >
+      <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-3">
+      <h3 className="text-base font-black flex items-center gap-2 text-slate-800">
+      <ShoppingBag className="w-4 h-4" style={{ color: BRAND_COLOR }} /> Tu Pedido
+      <span
+      className="text-white px-2.5 py-0.5 rounded-full text-xs font-black"
+      style={{ backgroundColor: BRAND_COLOR }}
+      >
+      {totalItemsCount}
+      </span>
+      </h3>
+      <button
+      onClick={() => setIsCartOpen(false)}
+      className="p-2 rounded-xl bg-slate-100 text-slate-600 hover:bg-slate-200 transition"
+      title="Cerrar carrito"
+      >
+      <X className="w-4 h-4" />
+      </button>
+      </div>
+
+      {/* AVISO DE DESCUENTO AUTOMÁTICO POR TIPO DE PRODUCTO (SIN MEZCLAR) */}
+      <div
+      className={`p-3.5 rounded-2xl mb-4 text-xs border ${
+        hasAutoDiscount
+        ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+        : 'bg-sky-50 border-sky-200 text-slate-700'
+      }`}
+      >
+      <div className="flex items-center gap-1.5 font-black">
+      <Percent className="w-4 h-4 flex-shrink-0" style={{ color: hasAutoDiscount ? '#059669' : '#2da8b4' }} />
+      {hasAutoDiscount ? (
+        <span>¡Descuento automático del {AUTO_DISCOUNT_PERCENT}% aplicado!</span>
+      ) : (
+        <span>Promo automática: {AUTO_DISCOUNT_PERCENT}% OFF en 3+ iguales</span>
+      )}
+      </div>
+      <p className="text-[11px] mt-1 font-medium leading-snug">
+      {hasAutoDiscount ? (
+        <>
+        Ahorras <strong>${autoDiscountAmount.toLocaleString()} COP</strong> por llevar 3 o más en:{' '}
+        <strong>{qualifiedGroups.map((g) => `${g.label} (${g.count})`).join(', ')}</strong>.
+        </>
+      ) : (
+        <>
+        Lleva <strong>3 o más piezas del mismo tipo</strong> (3 Conjuntos, 3 Pijamas o 3 Valentina, sin
+        combinar entre ellos) para activar el descuento.
+        </>
+      )}
+      </p>
+      </div>
+
+      {cart.length === 0 ? (
+        <p className="text-xs text-slate-400 text-center py-12 font-medium">
+        Tu carrito está esperando por prendas hermosas
+        </p>
+      ) : !showCheckoutForm ? (
+        <div className="space-y-4">
+        <div className="max-h-60 overflow-y-auto pr-1 space-y-3">
+        {cart.map((item, index) => {
+          const qty = item.quantity || 1
+          const group = getDiscountGroup(item.product)
+          const groupQualified = group && groupStats[group].count >= 3
+          return (
+            <div
+            key={index}
+            className="flex justify-between items-center text-xs border-b border-slate-100 pb-3 gap-2"
+            >
+            <div>
+            <p className="font-black text-slate-800">{item.product.name}</p>
+            <p className="text-[10px] font-extrabold text-slate-500 uppercase">
+            {item.product.category || 'General'}{' '}
+            {groupQualified && (
+              <span className="text-emerald-600">• -{AUTO_DISCOUNT_PERCENT}% aplicado</span>
+            )}
+            </p>
+            <p className="font-bold" style={{ color: '#2da8b4' }}>
+            Talla: {item.selectedSize || 'Única'}
+            </p>
+            <p className="text-slate-500 mt-0.5">
+            ${Number(item.product.price).toLocaleString()} COP × {qty}
+            </p>
+            </div>
+            <button
+            onClick={() => removeFromCart(index)}
+            className="text-rose-400 hover:text-rose-600 font-black p-2 transition text-sm"
+            >
+            ✕
+            </button>
+            </div>
+          )
+        })}
+        </div>
+
+        <div className="pt-3 border-t border-slate-100 space-y-2">
+        <div className="flex justify-between items-center text-xs font-bold text-slate-600">
+        <span>Subtotal:</span>
+        <span>${subtotalAmount.toLocaleString()} COP</span>
+        </div>
+
+        {hasAutoDiscount && (
+          <div className="flex justify-between items-center text-xs font-black text-emerald-600">
+          <span>Descuento ({AUTO_DISCOUNT_PERCENT}%):</span>
+          <span>-${autoDiscountAmount.toLocaleString()} COP</span>
+          </div>
+        )}
+
+        <div className="flex justify-between items-center text-base font-black pt-2 border-t border-slate-100 mb-4 text-slate-800">
+        <span>Total a pagar:</span>
+        <span className="text-lg" style={{ color: '#2da8b4' }}>
+        ${finalTotalAmount.toLocaleString()} COP
+        </span>
+        </div>
+
+        <button
+        onClick={() => setShowCheckoutForm(true)}
+        className="w-full text-white py-4 rounded-2xl text-xs font-black flex items-center justify-center gap-2 hover:opacity-95 shadow-md active:scale-95 transition"
+        style={{ backgroundColor: BRAND_COLOR }}
+        >
+        Continuar con los Datos de Envío
+        </button>
+        </div>
+        </div>
+      ) : (
+        /* FORMULARIO DE CHECKOUT */
+        <form onSubmit={handleSendWhatsApp} className="space-y-4">
+        <div className="flex justify-between items-center border-b border-slate-100 pb-2">
+        <span className="text-xs font-black" style={{ color: '#2da8b4' }}>
+        Datos para la Entrega
+        </span>
+        <button
+        type="button"
+        onClick={() => setShowCheckoutForm(false)}
+        className="text-[11px] text-slate-400 hover:text-slate-600 font-bold"
+        >
+        ← Volver
+        </button>
+        </div>
+
+        <div>
+        <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mb-1">
+        <User className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> Nombre Completo
+        </label>
+        <input
+        type="text"
+        required
+        placeholder="Ej: María Pérez"
+        value={customerName}
+        onChange={(e) => setCustomerName(e.target.value)}
+        className="w-full text-xs p-3 bg-sky-50/40 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-medium"
+        />
+        </div>
+
+        <div>
+        <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mb-1">
+        <MapPin className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> Dirección / Punto de Referencia
+        </label>
+        <input
+        type="text"
+        required
+        placeholder="Ej: Barrio obrero / plaza los mangos"
+        value={customerAddress}
+        onChange={(e) => setCustomerAddress(e.target.value)}
+        className="w-full text-xs p-3 bg-sky-50/40 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-medium"
+        />
+        </div>
+
+        <div>
+        <label className="text-[11px] font-bold text-slate-700 flex items-center gap-1 mb-1">
+        <CreditCard className="w-3.5 h-3.5" style={{ color: BRAND_COLOR }} /> Método de Pago (Pesos COP)
+        </label>
+        <select
+        value={paymentMethod}
+        onChange={(e) => setPaymentMethod(e.target.value)}
+        className="w-full text-xs p-3 bg-sky-50/40 border border-sky-200 rounded-xl focus:outline-none focus:border-[#49c5d1] font-bold text-slate-800"
+        >
+        <option value="Efectivo (Pesos COP)">Efectivo (Pesos COP)</option>
+        <option value="Transferencia Bancolombia">Transferencia Bancaria (Bancolombia)</option>
+        <option value="Nequi / Daviplata">Nequi / Daviplata</option>
+        </select>
+        </div>
+
+        <div className="pt-2 border-t border-slate-100 space-y-1.5">
+        {hasAutoDiscount && (
+          <div className="flex justify-between items-center text-xs font-black text-emerald-600">
+          <span>Descuento ({AUTO_DISCOUNT_PERCENT}%):</span>
+          <span>-${autoDiscountAmount.toLocaleString()} COP</span>
+          </div>
+        )}
+        <div className="flex justify-between items-center text-sm font-black mb-3 text-slate-800">
+        <span>Total:</span>
+        <span className="text-lg" style={{ color: '#2da8b4' }}>
+        ${finalTotalAmount.toLocaleString()} COP
+        </span>
+        </div>
+
+        <button
+        type="submit"
+        className="w-full bg-emerald-500 text-white py-4 rounded-2xl text-xs font-black flex items-center justify-center gap-2 hover:bg-emerald-600 shadow-md shadow-emerald-500/20 active:scale-95 transition"
+        >
+        <Send className="w-4 h-4" /> Enviar Pedido a WhatsApp
+        </button>
+        </div>
+        </form>
+      )}
+      </div>
+      </div>
+    )}
+
     <footer className="text-center py-6 text-xs font-bold text-slate-400 border-t border-sky-100 mt-12 bg-white/50">
     Valissa - Diseño y Costura Infantil © 2026 💖 Hecho con amor
     </footer>
@@ -808,16 +1008,24 @@ export default function App() {
 
 function ProductCard({ product, sizes, onAddToCart }) {
   const [selectedSize, setSelectedSize] = useState(sizes[0])
+  const [justAdded, setJustAdded] = useState(false)
 
-  const categoryName = CATEGORIES.find(c => c.id === product.category)?.name || product.category
+  const categoryName = CATEGORIES.find((c) => c.id === product.category)?.name || product.category
 
   // Determinar si es un producto personalizado / bajo pedido
-  const isCustomProduct = product.category === 'Bajo pedido' || product.category === 'Personalizados en sublimación'
+  const isCustomProduct =
+  product.category === 'Bajo pedido' || product.category === 'Personalizados en sublimación'
 
   function handleConsultProductWhatsApp() {
     const message = `*¡Hola Valissa!* 👋 Me interesa consultar por este diseño personalizado / bajo pedido:\n\n📌 *Prenda:* ${product.name}\n📂 *Categoría:* ${categoryName}\n💰 *Precio ref:* $${Number(product.price).toLocaleString()} COP\n📏 *Talla sugerida:* ${selectedSize || 'A coordinar'}\n\n¿Me podrías dar más detalles sobre los estampados, telas o el proceso de encargos?`
     const whatsappUrl = `https://wa.me/584242111582?text=${encodeURIComponent(message)}`
     window.open(whatsappUrl, '_blank')
+  }
+
+  function handleAddClick() {
+    onAddToCart(product, null, selectedSize)
+    setJustAdded(true)
+    setTimeout(() => setJustAdded(false), 1200)
   }
 
   return (
@@ -857,7 +1065,11 @@ function ProductCard({ product, sizes, onAddToCart }) {
       <button
       key={sz}
       onClick={() => setSelectedSize(sz)}
-      className={`text-[11px] px-3 py-1 rounded-full font-black border transition ${selectedSize === sz ? 'text-white border-[#49c5d1] shadow-sm' : 'bg-sky-50/50 text-slate-700 border-sky-200 hover:border-[#49c5d1]'}`}
+      className={`text-[11px] px-3 py-1 rounded-full font-black border transition ${
+        selectedSize === sz
+        ? 'text-white border-[#49c5d1] shadow-sm'
+        : 'bg-sky-50/50 text-slate-700 border-sky-200 hover:border-[#49c5d1]'
+      }`}
       style={selectedSize === sz ? { backgroundColor: BRAND_COLOR } : {}}
       >
       {sz}
@@ -878,12 +1090,23 @@ function ProductCard({ product, sizes, onAddToCart }) {
       </button>
     ) : (
       <button
-      onClick={() => onAddToCart(product, null, selectedSize)}
-      className="w-full text-white px-5 py-2.5 rounded-xl text-xs font-black hover:opacity-90 active:scale-95 transition shadow-md flex items-center justify-center gap-1.5"
-      style={{ backgroundColor: BRAND_COLOR }}
+      onClick={handleAddClick}
+      className={`w-full text-white px-5 py-2.5 rounded-xl text-xs font-black hover:opacity-90 active:scale-95 transition shadow-md flex items-center justify-center gap-1.5 ${
+        justAdded ? 'bg-emerald-500' : ''
+      }`}
+      style={!justAdded ? { backgroundColor: BRAND_COLOR } : {}}
       >
-      <ShoppingBag className="w-4 h-4" />
-      + Agregar al Pedido
+      {justAdded ? (
+        <>
+        <CheckCircle className="w-4 h-4" />
+        ¡Agregado!
+        </>
+      ) : (
+        <>
+        <ShoppingBag className="w-4 h-4" />
+        + Agregar al Pedido
+        </>
+      )}
       </button>
     )}
     </div>
